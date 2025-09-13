@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MagicBean & MyOrders Combined
 // @namespace    http://tampermonkey.net/
-// @version      1.3
-// @description  A combined and enhanced script for MagicBean and MyOrders with script control from database.
+// @version      1.2
+// @description  A combined and enhanced script for MagicBean and MyOrders with user authorization via Supabase.
 // @author       Ahmed Khaled
 // @match        *.centurygames.com/*
 // @grant        unsafeWindow
@@ -20,7 +20,6 @@
   const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
   let userAccessToken, userName;
-  const SCRIPT_NAME = 'MagicBean_MyOrders_Combined';
 
   // دالة للتحقق من حالة السكريبت (مفعل/معطل)
   async function checkScriptStatus() {
@@ -28,41 +27,36 @@
       const { data, error } = await supabaseClient
         .from('script_control')
         .select('is_enabled')
-        .eq('script_name', SCRIPT_NAME)
-        .order('last_updated', { ascending: false })
-        .limit(1);
+        .eq('script_name', 'MagicBean & MyOrders Combined')
+        .single();
 
       if (error) {
         console.error('Error checking script status:', error);
-        return true; // افترض التشغيل في حالة الخطأ
-      }
-
-      if (!data || data.length === 0) {
-        // إذا لم توجد إعدادات، قم بإنشاء سجل جديد بالسكريبت مفعل
-        await supabaseClient
-          .from('script_control')
-          .insert([{ script_name: SCRIPT_NAME, is_enabled: true }]);
         return true;
       }
 
-      return data[0].is_enabled;
+      return data.is_enabled;
     } catch (error) {
       console.error('Error with script status check:', error);
-      return true; // افترض التشغيل في حالة الخطأ
+      return true;
     }
   }
 
   // دالة لتسجيل دخول المستخدم
-  async function logUserAccess(snsid, userName, action, success) {
+  async function logUserAccess(snsid, action, success) {
+    const user_name = unsafeWindow?.currentUserInfo?.name || 'unknown';
+
     try {
       const { error } = await supabaseClient
         .from('user_access_logs')
-        .insert([{
-          snsid: snsid,
-          user_name: userName,
-          action: action,
-          success: success
-        }]);
+        .insert([
+          {
+            snsid: snsid,
+            user_name: user_name,
+            action: action,
+            success: success
+          }
+        ]);
 
       if (error) {
         console.error('Error logging user access:', error);
@@ -72,6 +66,25 @@
     }
   }
 
+  // دالة لتحميل الجيران المحصدين من localStorage
+  function loadHarvestedFriends() {
+    try {
+      const stored = localStorage.getItem('harvestedFriends');
+      return stored ? new Set(JSON.parse(stored)) : new Set();
+    } catch (e) {
+      console.error('Error loading harvested friends:', e);
+      return new Set();
+    }
+  }
+
+  // دالة لحفظ الجيران المحصدين في localStorage
+  function saveHarvestedFriends(harvestedFriends) {
+    try {
+      localStorage.setItem('harvestedFriends', JSON.stringify(Array.from(harvestedFriends)));
+    } catch (e) {
+      console.error('Error saving harvested friends:', e);
+    }
+  }
 
   // دالة لمسح الجيران المحصدين (للاستخدام عند الحاجة)
   function clearHarvestedFriends() {
@@ -102,7 +115,6 @@
       );
       const userData = await response.json();
       userName = userData.name;
-      return userData;
     } catch (error) {
       console.error('Error fetching user data:', error);
       alert('حدث خطأ أثناء جلب بيانات المستخدم.');
@@ -110,36 +122,51 @@
     }
   }
 
-  // دالة للتحقق من صلاحية استخدام السكريبت
-  async function checkScriptAccess() {
+  async function checkUserWhitelist() {
     const snsid = document.querySelector('#user-snsid')?.textContent?.match(/\d+/)?.[0] ||
       document.querySelector('.footer-snsid')?.textContent?.match(/\d+/)?.[0] || 'unknown';
 
     if (snsid === 'unknown') {
       alert('تعذر تحديد هوية المستخدم. يرجى المحاولة مرة أخرى.');
-      await logUserAccess(snsid, 'unknown', 'access_attempt', false);
+      await logUserAccess(snsid, 'access_denied', false);
       return false;
     }
 
     try {
-      // التحقق من حالة السكريبت أولاً
+      // التحقق أولاً من حالة السكريبت
       const isScriptEnabled = await checkScriptStatus();
       if (!isScriptEnabled) {
-        alert('السكريبت معطل حاليًا من قبل المسؤول. يرجى المحاولة لاحقًا.');
-        await logUserAccess(snsid, 'unknown', 'script_disabled', false);
+        alert('السكريبت معطل حاليًا. يرجى المحاولة لاحقًا.');
+        await logUserAccess(snsid, 'script_disabled', false);
         return false;
       }
 
-      // جلب بيانات المستخدم
-      const userData = await fetchUserData();
+      // ثم التحقق من صلاحية المستخدم
+      const { data, error } = await supabaseClient
+        .from('whitelisted_users')
+        .select('snsid')
+        .eq('snsid', snsid);
+
+      if (error) {
+        console.error('Supabase query error:', error);
+        await logUserAccess(snsid, 'database_error', false);
+        alert('حدث خطأ في التحقق من المستخدم. يرجى التواصل مع الدعم الفني.');
+        return false;
+      }
+
+      if (!data || data.length === 0) {
+        await logUserAccess(snsid, 'access_denied', false);
+        alert('غير مسموح لك باستخدام الاسكريبت. اطلب إذن الوصول من المطور - Ahmed Khaled');
+        return false;
+      }
 
       // تسجيل الدخول الناجح
-      await logUserAccess(snsid, userData.name, 'access_granted', true);
+      await logUserAccess(snsid, 'access_granted', true);
       return true;
     } catch (error) {
-      console.error('Error with script access check:', error);
+      console.error('Error with Supabase client:', error);
+      await logUserAccess(snsid, 'connection_error', false);
       alert('حدث خطأ في الاتصال بقاعدة البيانات. يرجى المحاولة لاحقًا.');
-      await logUserAccess(snsid, 'unknown', 'connection_error', false);
       return false;
     }
   }
@@ -417,16 +444,19 @@
     }
   }
 
-   const actionButton = unsafeWindow.document.createElement('BUTTON');
+  const actionButton = unsafeWindow.document.createElement('BUTTON');
   actionButton.innerHTML = 'MagicBean';
-  actionButton.onclick = async () => {
+ actionButton.onclick = async () => {
     playSound('');
     playLoopedSound('');
-    const hasAccess = await checkScriptAccess();
-    if (hasAccess) {
-      showActionMenu();
+    const isScriptEnabled = await checkScriptStatus();  // التحقق من حالة السكربت
+    if (isScriptEnabled) {
+      await fetchUserData();
+      showActionMenu();  // بعد التأكد من أن السكربت مفعل
+    } else {
+      console.log('Script is disabled, operation halted.');
     }
-  };
+};
 
   actionButton.style.cssText =
     'display: inline-block; position: relative; top: 0px; width: auto; background: linear-gradient(135deg, #2c3e50, #34495e); color: #fff; padding: 10px 15px; margin: 10px; font-size: 16px; font-weight: bold; border-radius: 8px; border: none; cursor: pointer; transition: all 0.3s ease 0s; font-family: "Arial Black", Gadget, sans-serif; box-shadow: 0 4px 8px rgba(0,0,0,0.2);';
