@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MagicBean & MyOrders Combined
 // @namespace    http://tampermonkey.net/
-// @version      1.2
-// @description  A combined and enhanced script for MagicBean and MyOrders with user authorization via Supabase.
+// @version      1.3
+// @description  A combined and enhanced script for MagicBean and MyOrders with script control from database.
 // @author       Ahmed Khaled
 // @match        *.centurygames.com/*
 // @grant        unsafeWindow
@@ -13,33 +13,65 @@
   'use strict';
 
   // Supabase Configuration
-  const SUPABASE_URL = 'https://wuauxagghhzqrxgotcqo.supabase.co'; // Replace with your Supabase URL
-  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind1YXV4YWdnaGh6cXJ4Z290Y3FvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTI0NjU3NzYsImV4cCI6MjA2ODA0MTc3Nn0.W7Ayyfdh3qmrfzw_F5t35umQZRIdmqKENNdk3HYcNVE'; // Replace with your Supabase Anon Key
+  const SUPABASE_URL = 'https://wuauxagghhzqrxgotcqo.supabase.co';
+  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind1YXV4YWdnaGh6cXJ4Z290Y3FvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTI0NjU3NzYsImV4cCI6MjA2ODA0MTc3Nn0.W7Ayyfdh3qmrfzw_F5t35umQZRIdmqKENNdk3HYcNVE';
 
   const { createClient } = supabase;
   const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
   let userAccessToken, userName;
+  const SCRIPT_NAME = 'MagicBean_MyOrders_Combined';
 
-  // دالة لتحميل الجيران المحصدين من localStorage
-  function loadHarvestedFriends() {
+  // دالة للتحقق من حالة السكريبت (مفعل/معطل)
+  async function checkScriptStatus() {
     try {
-      const stored = localStorage.getItem('harvestedFriends');
-      return stored ? new Set(JSON.parse(stored)) : new Set();
-    } catch (e) {
-      console.error('Error loading harvested friends:', e);
-      return new Set();
+      const { data, error } = await supabaseClient
+        .from('script_control')
+        .select('is_enabled')
+        .eq('script_name', SCRIPT_NAME)
+        .order('last_updated', { ascending: false })
+        .limit(1);
+
+      if (error) {
+        console.error('Error checking script status:', error);
+        return true; // افترض التشغيل في حالة الخطأ
+      }
+
+      if (!data || data.length === 0) {
+        // إذا لم توجد إعدادات، قم بإنشاء سجل جديد بالسكريبت مفعل
+        await supabaseClient
+          .from('script_control')
+          .insert([{ script_name: SCRIPT_NAME, is_enabled: true }]);
+        return true;
+      }
+
+      return data[0].is_enabled;
+    } catch (error) {
+      console.error('Error with script status check:', error);
+      return true; // افترض التشغيل في حالة الخطأ
     }
   }
 
-  // دالة لحفظ الجيران المحصدين في localStorage
-  function saveHarvestedFriends(harvestedFriends) {
+  // دالة لتسجيل دخول المستخدم
+  async function logUserAccess(snsid, userName, action, success) {
     try {
-      localStorage.setItem('harvestedFriends', JSON.stringify(Array.from(harvestedFriends)));
-    } catch (e) {
-      console.error('Error saving harvested friends:', e);
+      const { error } = await supabaseClient
+        .from('user_access_logs')
+        .insert([{
+          snsid: snsid,
+          user_name: userName,
+          action: action,
+          success: success
+        }]);
+
+      if (error) {
+        console.error('Error logging user access:', error);
+      }
+    } catch (error) {
+      console.error('Error with user access logging:', error);
     }
   }
+
 
   // دالة لمسح الجيران المحصدين (للاستخدام عند الحاجة)
   function clearHarvestedFriends() {
@@ -70,6 +102,7 @@
       );
       const userData = await response.json();
       userName = userData.name;
+      return userData;
     } catch (error) {
       console.error('Error fetching user data:', error);
       alert('حدث خطأ أثناء جلب بيانات المستخدم.');
@@ -77,36 +110,36 @@
     }
   }
 
-  async function checkUserWhitelist() {
+  // دالة للتحقق من صلاحية استخدام السكريبت
+  async function checkScriptAccess() {
     const snsid = document.querySelector('#user-snsid')?.textContent?.match(/\d+/)?.[0] ||
       document.querySelector('.footer-snsid')?.textContent?.match(/\d+/)?.[0] || 'unknown';
 
     if (snsid === 'unknown') {
       alert('تعذر تحديد هوية المستخدم. يرجى المحاولة مرة أخرى.');
+      await logUserAccess(snsid, 'unknown', 'access_attempt', false);
       return false;
     }
 
     try {
-      const { data, error } = await supabaseClient
-        .from('whitelisted_users')
-        .select('snsid')
-        .eq('snsid', snsid);
-
-      if (error) {
-        console.error('Supabase query error:', error);
-        alert('حدث خطأ في التحقق من المستخدم. يرجى التواصل مع الدعم الفني.');
+      // التحقق من حالة السكريبت أولاً
+      const isScriptEnabled = await checkScriptStatus();
+      if (!isScriptEnabled) {
+        alert('السكريبت معطل حاليًا من قبل المسؤول. يرجى المحاولة لاحقًا.');
+        await logUserAccess(snsid, 'unknown', 'script_disabled', false);
         return false;
       }
 
-      if (!data || data.length === 0) {
-        alert('غير مسموح لك باستخدام الاسكريبت. اطلب إذن الوصول من المطور - Ahmed Khaled');
-        return false;
-      }
+      // جلب بيانات المستخدم
+      const userData = await fetchUserData();
 
+      // تسجيل الدخول الناجح
+      await logUserAccess(snsid, userData.name, 'access_granted', true);
       return true;
     } catch (error) {
-      console.error('Error with Supabase client:', error);
+      console.error('Error with script access check:', error);
       alert('حدث خطأ في الاتصال بقاعدة البيانات. يرجى المحاولة لاحقًا.');
+      await logUserAccess(snsid, 'unknown', 'connection_error', false);
       return false;
     }
   }
@@ -384,14 +417,13 @@
     }
   }
 
-  const actionButton = unsafeWindow.document.createElement('BUTTON');
+   const actionButton = unsafeWindow.document.createElement('BUTTON');
   actionButton.innerHTML = 'MagicBean';
   actionButton.onclick = async () => {
     playSound('');
     playLoopedSound('');
-    const isWhitelisted = await checkUserWhitelist();
-    if (isWhitelisted) {
-      await fetchUserData();
+    const hasAccess = await checkScriptAccess();
+    if (hasAccess) {
       showActionMenu();
     }
   };
